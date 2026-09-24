@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gs4d"
+version = "0.1.0"
+description = "Animate static 3D Gaussian Splatting trees with wind (4DGS) and export to Blender / Houdini / USD"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.23",
+    "scipy>=1.9",
+    "imageio>=2.28",
+    "imageio-ffmpeg",
+    "pillow",
+    "matplotlib",
+]
+
+[project.optional-dependencies]
+usd = ["usd-core>=26.3"]
+gpu = ["torch", "gsplat>=1.4"]
+train = ["torch", "gsplat>=1.4", "pycolmap>=3.10", "rembg[gpu]"]
+dev = ["pytest", "nbformat", "nbclient", "ipykernel", "usd-core>=26.3"]
+
+[tool.setuptools]
+packages = ["gs4d", "gs4d.data"]
+
+[tool.setuptools.package-data]
+"gs4d.data" = ["*.py"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
