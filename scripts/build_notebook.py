@@ -106,8 +106,16 @@ md("""
 * **procedural** — a broad-leaf tree grown directly out of Gaussians (bark splats + flat leaf splats), object-only
   by construction and with its exact branch skeleton. Tick `SIMULATE_CAPTURE_ARTIFACTS` to wrap it in the junk
   a real capture contains (ground, a bush, a shell of sky splats, floaters) so step 3 has something to clean.
-* **upload / url** — any 3DGS `.ply` (Postshot, Polycam, Luma, KIRI, Scaniverse, gsplat, nerfstudio, Brush,
-  SuperSplat *uncompressed*) or `.splat`.
+* **upload / url / google drive** — any 3DGS `.ply` (Postshot, Polycam, Luma, KIRI, Scaniverse, gsplat,
+  nerfstudio, Brush, SuperSplat *uncompressed*) or `.splat`, **or a scanned point cloud** (`.ply` without splat
+  attributes, `.xyz/.txt/.pts/.las/.laz`), or a `.zip` containing one. Point clouds have no photos to optimise
+  against, so each local cluster of points is *fitted* with a Gaussian (flat surfels on bark and leaves, elongated
+  along twigs; dense scans are merged per voxel). The tree is isolated from the ground *before* fitting, so the
+  whole `MAX_GAUSSIANS` budget goes to the tree. For **google drive**, set `DRIVE_PATH` to the file inside
+  `/content/drive/MyDrive/…` (Colab asks for permission to mount your Drive).
+* **oak scan (repo)** — the 200-year-old oak in `test_asset/` (4.6M coloured points, photogrammetry). Sky-coloured
+  leaf points are repainted from their neighbours first (`fix_sky_bleed`), then the tree is fitted with
+  `MAX_GAUSSIANS` splats. On a CPU runtime use ~300k for a quick look.
 * **trained_from_video** — the model produced by the appendix (`work/trained_object.ply`).
 
 `UP_AXIS = auto` uses the ground plane when there is one, otherwise the tree's shape (thin trunk below a wide
@@ -116,8 +124,11 @@ crown) and colours (bark below, leaves above). If the previews show the tree sid
 
 code('''
 #@title 2 · Choose the tree  { display-mode: "form" }
-SOURCE = "procedural"  #@param ["procedural", "upload .ply/.splat", "url", "trained_from_video"]
+SOURCE = "procedural"  #@param ["procedural", "oak scan (repo)", "upload (splat / point cloud / zip)", "url", "google drive", "trained_from_video"]
 URL = ""  #@param {type:"string"}
+DRIVE_PATH = "/content/drive/MyDrive/200-year-old-oak-tree.zip"  #@param {type:"string"}
+#@markdown **Point clouds** are fitted with at most this many Gaussians
+MAX_GAUSSIANS = 600000  #@param {type:"integer"}
 #@markdown **Procedural tree**
 TREE_SEED = 21  #@param {type:"integer"}
 LEAF_DENSITY = 1.0  #@param {type:"slider", min:0.3, max:2.0, step:0.1}
@@ -126,7 +137,9 @@ SIMULATE_CAPTURE_ARTIFACTS = True  #@param {type:"boolean"}
 #@markdown **Orientation of the file**
 UP_AXIS = "auto"  #@param ["auto", "+z", "-z", "+y", "-y", "+x", "-x"]
 
-skeleton, truth = None, None
+if TEST_MODE and os.environ.get("GS4D_TEST_SCAN"):   # automated test of the scan path
+    SOURCE, DRIVE_PATH, MAX_GAUSSIANS = "google drive", os.environ["GS4D_TEST_SCAN"], 20000
+skeleton, truth, pre_isolated, up_scan = None, None, False, None
 if SOURCE == "procedural":
     base = TreeParams()
     lpb = tuple(max(2, int(round(n * LEAF_DENSITY))) for n in base.leaves_per_branch)
@@ -136,23 +149,41 @@ if SOURCE == "procedural":
         scene, truth = make_captured_scene(tree, seed=TREE_SEED)
     else:
         scene = tree
-elif SOURCE.startswith("upload"):
-    from google.colab import files
-    uploaded = files.upload()
-    scene = load_gaussians(list(uploaded)[0])
-elif SOURCE == "url":
-    import urllib.request
-    path = os.path.join(OUT, os.path.basename(URL.split("?")[0]) or "download.ply")
-    urllib.request.urlretrieve(URL, path)
-    scene = load_gaussians(path)
 else:
-    scene = load_gaussians(os.path.join(ROOT, "work", "trained_object.ply"))
+    from gs4d.pointcloud import extract_from_zip, is_point_cloud_file, load_scan
+    if SOURCE.startswith("upload"):
+        from google.colab import files
+        path = list(files.upload())[0]
+    elif SOURCE == "url":
+        import urllib.request
+        path = os.path.join(OUT, os.path.basename(URL.split("?")[0]) or "download.ply")
+        urllib.request.urlretrieve(URL, path)
+    elif SOURCE == "google drive":
+        if IN_COLAB and not os.path.exists("/content/drive/MyDrive"):
+            from google.colab import drive
+            drive.mount("/content/drive")
+        path = DRIVE_PATH
+    elif SOURCE.startswith("oak"):
+        path = os.path.join(ROOT, "test_asset", "200-year-old-oak-tree.zip")
+    else:
+        path = os.path.join(ROOT, "work", "trained_object.ply")
+    if str(path).lower().endswith(".zip"):
+        path = extract_from_zip(path, os.path.join(OUT, "scan"))
+    if is_point_cloud_file(path):
+        # isolate the tree on a coarse fit, then fit only the tree's points with the full budget
+        scene, up_scan, _ = load_scan(path, max_gaussians=MAX_GAUSSIANS, isolate=True,
+                                      up="auto" if UP_AXIS == "auto" else UP_AXIS)
+        pre_isolated = True
+    else:
+        scene = load_gaussians(path)
 print(scene.summary())
 
 if UP_AXIS != "auto":
     up = parse_up(UP_AXIS); how = "set by hand"
 elif SOURCE == "procedural":
     up = parse_up("+z"); how = "procedural trees are +Z up"
+elif up_scan is not None:
+    up, how = up_scan, "estimated from the scan (ground plane, else trunk/crown shape)"
 else:
     up, how = estimate_up(scene)
 print("up vector:", np.round(up, 3), "-", how)
@@ -181,7 +212,10 @@ REMOVE_GROUND = True  #@param {type:"boolean"}
 #@markdown Crop-cylinder radius in model units (0 = automatic)
 CROP_RADIUS = 0.0  #@param {type:"number"}
 
-if RUN_ISOLATION:
+if pre_isolated:
+    print("point cloud: the tree was already isolated before fitting (step 2)")
+    keep, tree_only = np.ones(len(scene), bool), scene
+elif RUN_ISOLATION:
     keep, report = isolate_object(scene, up=up, min_opacity=MIN_OPACITY, remove_ground=REMOVE_GROUND,
                                   radius=CROP_RADIUS or None)
     tree_only = scene.subset(keep)
@@ -286,6 +320,8 @@ code('''
 CAMERA = "front"  #@param ["front", "slow orbit", "canopy close-up"]
 PREVIEW_SIZE = 400  #@param {type:"slider", min:200, max:1080, step:40}
 BACKGROUND = "white"  #@param ["white", "sky", "black"]
+#@markdown Render every Nth frame (2-3 keeps big scans quick on a CPU runtime)
+PREVIEW_EVERY = 1  #@param {type:"slider", min:1, max:4, step:1}
 bg = {"white": (1, 1, 1), "sky": (0.78, 0.86, 0.96), "black": (0, 0, 0)}[BACKGROUND]
 if TEST_MODE:
     PREVIEW_SIZE = 128
@@ -309,11 +345,11 @@ else:
 
 import time
 t0, frames = time.time(), []
-for i in range(len(anim)):
+for i in range(0, len(anim), PREVIEW_EVERY):
     frames.append(render_frames([anim[i]], cams[i], background=bg, backend=BACKEND, progress=False)[0])
     if i % max(1, len(anim) // 6) == 0:
         print(f"  frame {i + 1}/{len(anim)}  ({time.time() - t0:.0f}s)")
-mp4 = write_mp4(frames, os.path.join(OUT, "preview.mp4"), fps=FPS, loops=2)
+mp4 = write_mp4(frames, os.path.join(OUT, "preview.mp4"), fps=FPS / PREVIEW_EVERY, loops=2)
 print("saved", mp4)
 display(html_video(mp4, width=min(PREVIEW_SIZE, 640)))
 ''', hidden=True)
@@ -491,6 +527,8 @@ if RUN_TRAINING:
 ''', hidden=True)
 
 nb = nbf.v4.new_notebook()
+for i, c in enumerate(cells):
+    c["id"] = f"cell-{i:02d}"      # stable ids keep regenerated notebooks diff-friendly
 nb.cells = cells
 nb.metadata = {
     "accelerator": "GPU",

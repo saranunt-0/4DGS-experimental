@@ -146,7 +146,9 @@ def guess_up_axis(model: GaussianModel, return_scores: bool = False):
     Two cues per signed axis:
 
     * geometry - a tree stands on a thin trunk and carries a wide crown, so
-      the bottom band is much thinner than the widest band;
+      the bottom band is much thinner *and much lighter* than the widest /
+      heaviest band (the mass term matters for broad trees whose drooping
+      branches reach down beside a short trunk, e.g. old oaks);
     * colour   - bark-brown at the bottom, leaf-green at the top.
 
     The colour cue is very reliable for green foliage and is ignored when the
@@ -163,15 +165,17 @@ def guess_up_axis(model: GaussianModel, return_scores: bool = False):
     for name, a in AXES.items():
         a = np.asarray(a, np.float64)
         h = (x - c) @ a
-        lo, hi = np.quantile(h, [0.01, 0.99])
+        lo, hi = np.quantile(h, [0.005, 0.995])
         t = (h - lo) / max(hi - lo, 1e-9)
         radial = np.linalg.norm((x - c) - np.outer(h, a), axis=1)
         bands = [radial[(t >= b) & (t < b + 0.12)] for b in np.arange(0.0, 0.96, 0.12)]
-        spreads = np.array([np.median(b) if len(b) > 20 else np.nan for b in bands])
+        # lower-quartile radius: the trunk core, not the branch tips hanging down beside it
+        spreads = np.array([np.quantile(b, 0.25) if len(b) > 20 else np.nan for b in bands])
+        counts = np.array([len(b) for b in bands], np.float64)
         if np.isnan(spreads[0]) or np.all(np.isnan(spreads)):
             geo = -10.0
         else:
-            geo = float(np.log(np.nanmax(spreads) / (spreads[0] + 1e-9)))
+            geo = float(np.log(np.nanmax(spreads) / (spreads[0] + 1e-9)) + np.log(counts.max() / (counts[0] + 1.0)))
         top, bot = t > 0.6, t < 0.2
         col = 0.0
         if top.any() and bot.any():
@@ -412,7 +416,6 @@ def extract_skeleton(
 def subtree_sizes(parents: np.ndarray, weights: np.ndarray) -> np.ndarray:
     """Sum of ``weights`` over each joint's subtree."""
     parents = np.asarray(parents, np.int64)
-    J = len(parents)
     tmp = TreeSkeleton.__new__(TreeSkeleton)
     tmp.parents = parents
     depth = TreeSkeleton._compute_depth(tmp)
@@ -431,9 +434,8 @@ def auto_leafness(
     hue_center_deg: float = 95.0,
 ) -> np.ndarray:
     """Combine a colour cue (green) with a structural cue (thin, peripheral joints)."""
-    J = len(parents)
     if counts_per_node is None:
-        counts_per_node = np.bincount(np.maximum(bind, 0), minlength=J).astype(np.float64)
+        counts_per_node = np.bincount(np.maximum(bind, 0), minlength=len(parents)).astype(np.float64)
     sub = subtree_sizes(parents, counts_per_node)
     s = np.sqrt(sub / max(sub.max(), 1e-9))  # pipe-model "thickness" 0..1
     thin = 1.0 - _smoothstep(s[np.maximum(bind, 0)], 0.15, 0.45)

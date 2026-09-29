@@ -19,7 +19,6 @@ optimiser deletes or never creates them.  Remaining specks are removed by
 
 from __future__ import annotations
 
-import math
 import time
 from dataclasses import dataclass, field
 from pathlib import Path

@@ -76,27 +76,49 @@ model = train_object_splat(data, TrainConfig(iters=7000, alpha_lambda=0.3))
 ### 3.4 Measured on synthetic captures
 `gs4d.synthetic.make_captured_scene` wraps a procedural tree in the junk a real capture contains: a 12k-splat
 ground disc, a bush, a 3k-splat sky shell (partly below the horizon) and 2.5k floaters. The tree is 30–80% of
-all splats. We evaluated 4 trees (one strongly leaning, one small and sparse) × 3 random scenes:
+all splats. We evaluated 4 trees (one strongly leaning, one small and sparse) × 3 random scenes
+(reproduce with `python scripts/benchmark_isolation.py`):
 
 | Method | Tree splats kept | Background splats kept |
 |---|---|---|
-| `isolate_object` (no cameras / masks) | **100.0 %** (min 99.8 %) | 0.12 % (max 0.17 %) |
+| `isolate_object` (no cameras / masks) | **99.9 %** (min 99.8 %) | 0.21 % (max 0.35 %) |
 | `mask_vote`, 16 views with object masks | **100 %** | 0.46 % (max 0.82 %) |
-| `mask_vote` + `isolate_object` | 98.9 % (min 96.4 %) | **0.06 %** (max 0.09 %) |
-| clean tree only (must not be damaged) | 96.6–99.6 %, "no ground" correctly reported | – |
-| capture tilted 15° / 30° off the declared up axis | 100 % | 0.14 %, ground normal recovered to < 0.1° |
+| `mask_vote` + `isolate_object` | 99.9 % (min 99.8 %) | **0.12 %** (max 0.23 %) |
+| clean tree only (must not be damaged) | 99.7–99.8 %, "no ground" correctly reported | – |
+| capture tilted 15° / 30° off the declared up axis | 99.95 % | 0.25 %, ground normal recovered to < 0.1° |
+| **point-cloud scan** (200k points, tree + ground), `isolate_point_cloud` | 99.4–99.6 % of tree *points* | 0.02–0.08 % of ground points |
 
 Lessons from building this (each was a real failure along the way):
 * A plain RANSAC "lowest plane" locks onto the **underside of the crown**. Requiring the plane to have almost all
   *opaque* mass above it fixes this.
-* Thresholds derived from the full scene extent are ruined by the **sky shell**. Use robust quantiles and measure
-  the ground's actual thickness after a least-squares refit.
+* Thresholds derived from the full scene extent are ruined by the **sky shell** (and by junk *below* the ground).
+  Use robust quantiles and measure the ground's actual thickness after a least-squares refit.
+* Real ground (grass, litter, fitted scan splats) is a **layer, not a plane**. Also remove its fringe outside the
+  trunk footprint.
 * A hard crop radius cuts **leaning or lopsided crowns**. Using the crop only as a seed and growing by
   connectivity fixes this.
+* Connectivity needs care in both directions. Bridge small gaps so sparse crowns stay one piece, but let only
+  **voxels with ≥ 2 opaque splats** form bridges, or chains of floaters glue a nearby bush onto the tree. Size
+  the voxels from the splat spacing.
 * Loose **outlier removal** matters: at `std_ratio=2.5` it deleted 2% of a clean tree (isolated leaves).
 
 The COLMAP stage was verified on 36 synthetic renders: all 36 registered, and camera centres matched ground truth to
 0.2% of the orbit radius after similarity alignment.
+
+### 3.5 Scanned point clouds (LiDAR / photogrammetry `.ply`, `.las`, `.xyz`)
+There are no photos to optimise against, so `gs4d.pointcloud` *fits* Gaussians to the points:
+* **surfels** (up to 3 points per Gaussian): one Gaussian per point, oriented by a PCA of its 12 neighbours. The
+  result is flat on bark and leaves, elongated along twigs, and sized from the local spacing;
+* **voxel fitting** (dense scans): mean colour and point *covariance* per voxel, with the voxel size chosen to hit
+  the Gaussian budget;
+* survey coordinates (UTM etc.) are recentred in float64 before the float32 cast.
+
+`load_scan()` (and `scripts/animate_pointcloud.py`) first repairs **sky bleed**: leaf points coloured blue or
+white by the sky behind them are recoloured from their neighbours (`fix_sky_bleed`). It then isolates the tree on
+a coarse fit and spends the whole budget on the tree's points. Limitation: fitted splats are view-independent
+(SH degree 0). For true 3DGS quality you still need the original photos (appendix of the notebook), or
+render-to-splat distillation on a GPU. See [`object_asset_workflows.md`](object_asset_workflows.md) for how
+production tools make object-only assets and the full oak-scan walkthrough.
 
 ## 4. Tree-specific tips
 

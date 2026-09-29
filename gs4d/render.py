@@ -192,7 +192,13 @@ def render_cpu(
         ok = det > 1e-12
         mid = 0.5 * (a + c)
         lam = mid + np.sqrt(np.maximum(mid * mid - det, 0.0))
-        rad = np.minimum(np.ceil(3.0 * np.sqrt(lam)), max_radius_px).astype(np.int64)
+        r3 = 3.0 * np.sqrt(lam)
+        # splats larger than the radius cap are shrunk to fit (instead of being cut into squares)
+        shrink = np.minimum(1.0, max_radius_px / np.maximum(r3, 1e-9)) ** 2
+        a, b, c = a * shrink, b * shrink, c * shrink
+        det = a * c - b * b
+        ok &= det > 1e-12
+        rad = np.minimum(np.ceil(r3 * np.sqrt(shrink)), max_radius_px).astype(np.int64)
         uc = cam.fx * pc[:, 0] / zc + cam.cx
         vc = cam.fy * pc[:, 1] / zc + cam.cy
         x0 = np.clip(np.floor(uc - rad).astype(np.int64), 0, W - 1)
@@ -220,7 +226,7 @@ def render_cpu(
         dy = (py + 0.5).astype(np.float32) - vc.astype(np.float32)[g]
         power = -0.5 * (ca[g] * dx * dx + cb[g] * dx * dy + cc[g] * dy * dy)
         alpha = np.minimum(np.float32(0.99), opac_all[ids].astype(np.float32)[g] * np.exp(power))
-        keep = alpha >= 1.0 / 255.0
+        keep = (alpha >= 1.0 / 255.0) & (power > -4.5)  # 3-sigma ellipse, like the 3DGS rasteriser
         g, alpha = g[keep], alpha[keep]
         pix = (py * W + px)[keep]
         if len(pix) == 0:
@@ -255,7 +261,7 @@ def render_cpu(
 def gsplat_available() -> bool:
     try:
         import torch  # noqa: F401
-        import gsplat  # noqa: F401
+        import gsplat  # noqa: F401  (availability check)
 
         return bool(torch.cuda.is_available())
     except Exception:
