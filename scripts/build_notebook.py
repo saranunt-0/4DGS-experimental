@@ -113,6 +113,9 @@ md("""
   along twigs; dense scans are merged per voxel). The tree is isolated from the ground *before* fitting, so the
   whole `MAX_GAUSSIANS` budget goes to the tree. For **google drive**, set `DRIVE_PATH` to the file inside
   `/content/drive/MyDrive/…` (Colab asks for permission to mount your Drive).
+* **oak scan (repo)** — the 200-year-old oak in `test_asset/` (4.6M coloured points, photogrammetry). Sky-coloured
+  leaf points are repainted from their neighbours first (`fix_sky_bleed`), then the tree is fitted with
+  `MAX_GAUSSIANS` splats. On a CPU runtime use ~300k for a quick look.
 * **trained_from_video** — the model produced by the appendix (`work/trained_object.ply`).
 
 `UP_AXIS = auto` uses the ground plane when there is one, otherwise the tree's shape (thin trunk below a wide
@@ -121,7 +124,7 @@ crown) and colours (bark below, leaves above). If the previews show the tree sid
 
 code('''
 #@title 2 · Choose the tree  { display-mode: "form" }
-SOURCE = "procedural"  #@param ["procedural", "upload (splat / point cloud / zip)", "url", "google drive", "trained_from_video"]
+SOURCE = "procedural"  #@param ["procedural", "oak scan (repo)", "upload (splat / point cloud / zip)", "url", "google drive", "trained_from_video"]
 URL = ""  #@param {type:"string"}
 DRIVE_PATH = "/content/drive/MyDrive/200-year-old-oak-tree.zip"  #@param {type:"string"}
 #@markdown **Point clouds** are fitted with at most this many Gaussians
@@ -160,6 +163,8 @@ else:
             from google.colab import drive
             drive.mount("/content/drive")
         path = DRIVE_PATH
+    elif SOURCE.startswith("oak"):
+        path = os.path.join(ROOT, "test_asset", "200-year-old-oak-tree.zip")
     else:
         path = os.path.join(ROOT, "work", "trained_object.ply")
     if str(path).lower().endswith(".zip"):
@@ -178,7 +183,7 @@ if UP_AXIS != "auto":
 elif SOURCE == "procedural":
     up = parse_up("+z"); how = "procedural trees are +Z up"
 elif up_scan is not None:
-    up, how = up_scan, "ground plane of the scan"
+    up, how = up_scan, "estimated from the scan (ground plane, else trunk/crown shape)"
 else:
     up, how = estimate_up(scene)
 print("up vector:", np.round(up, 3), "-", how)
@@ -522,6 +527,8 @@ if RUN_TRAINING:
 ''', hidden=True)
 
 nb = nbf.v4.new_notebook()
+for i, c in enumerate(cells):
+    c["id"] = f"cell-{i:02d}"      # stable ids keep regenerated notebooks diff-friendly
 nb.cells = cells
 nb.metadata = {
     "accelerator": "GPU",

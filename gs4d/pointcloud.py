@@ -128,11 +128,12 @@ def choose_voxel_size(points: np.ndarray, target: int, iters: int = 14) -> float
     """Voxel size whose occupied-voxel count is close to ``target``."""
     ext = np.ptp(points, axis=0).max()
     lo, hi = ext / 4096.0, ext / 8.0
-    sample = points if len(points) <= 3_000_000 else points[np.random.default_rng(0).choice(len(points), 3_000_000, replace=False)]
-    scale = len(points) / len(sample)
+    # occupied-voxel counts do not scale linearly with a subsample (dense voxels are hit anyway), so only
+    # subsample huge clouds; the count is then a slight underestimate
+    sample = points if len(points) <= 8_000_000 else points[np.random.default_rng(0).choice(len(points), 8_000_000, replace=False)]
     for _ in range(iters):
         mid = np.sqrt(lo * hi)
-        n = len(np.unique(_voxel_keys(sample, mid))) * (scale if scale > 1 else 1)
+        n = len(np.unique(_voxel_keys(sample, mid)))
         if n > target:
             lo = mid
         else:
@@ -259,18 +260,27 @@ def isolate_point_cloud(pc: PointCloud, up="auto", coarse_count: int = 200_000, 
 SCAN_EXTS = (".ply", ".splat", ".xyz", ".txt", ".pts", ".csv", ".npy", ".las", ".laz")
 
 
-def extract_from_zip(path: str | os.PathLike, out_dir: str | os.PathLike) -> Path:
-    """Extract the largest point-cloud / splat file from a zip archive."""
+def extract_from_zip(path: str | os.PathLike, out_dir: str | os.PathLike, _depth: int = 0) -> Path:
+    """Extract the largest point-cloud / splat file from a zip archive.
+
+    Nested archives (e.g. Sketchfab downloads: ``model.zip/source/scan.zip``)
+    are searched too.
+    """
     import zipfile
 
     with zipfile.ZipFile(path) as z:
-        members = [m for m in z.infolist()
-                   if Path(m.filename).suffix.lower() in SCAN_EXTS and not m.filename.startswith("__MACOSX")]
+        infos = [m for m in z.infolist() if not m.filename.startswith("__MACOSX")]
+        members = [m for m in infos if Path(m.filename).suffix.lower() in SCAN_EXTS]
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
         if not members:
-            raise ValueError(f"no point cloud / splat file in {path}: {[m.filename for m in z.infolist()][:20]}")
+            nested = [m for m in infos if m.filename.lower().endswith(".zip")]
+            if nested and _depth < 3:
+                inner = max(nested, key=lambda m: m.file_size)
+                print(f"zip: no scan file at the top level, opening nested {inner.filename}")
+                return extract_from_zip(z.extract(inner, out_dir), out_dir, _depth + 1)
+            raise ValueError(f"no point cloud / splat file in {path}: {[m.filename for m in infos][:20]}")
         best = max(members, key=lambda m: m.file_size)
         print(f"zip: {[(m.filename, m.file_size) for m in members]} -> using {best.filename}")
-        Path(out_dir).mkdir(parents=True, exist_ok=True)
         return Path(z.extract(best, out_dir))
 
 
@@ -288,11 +298,12 @@ def is_point_cloud_file(path: str | os.PathLike) -> bool:
 
 
 def load_scan(path: str | os.PathLike, max_gaussians: int = 600_000, isolate: bool = True, up="auto",
-              work_dir: str | os.PathLike | None = None):
+              work_dir: str | os.PathLike | None = None, fix_sky: bool = True):
     """Scan (zip / point cloud / 3DGS file) -> object-only Gaussians.
 
-    Point clouds are isolated on a coarse fit first, then only the tree's
-    points are fitted with the full ``max_gaussians`` budget.  Returns
+    Coloured point clouds first get their sky-bleed colours repaired
+    (``fix_sky``), are isolated on a coarse fit, then only the tree's points
+    are fitted with the full ``max_gaussians`` budget.  Returns
     ``(model, up_vector, source_path)``.
     """
     from .cleanup import isolate_object
@@ -306,6 +317,8 @@ def load_scan(path: str | os.PathLike, max_gaussians: int = 600_000, isolate: bo
         pc = read_point_cloud(path)
         print(f"point cloud: {len(pc):,} points, colours: {pc.colors is not None}"
               + (f", recentred by {pc.offset.tolist()}" if np.any(pc.offset) else ""))
+        if fix_sky:
+            pc = fix_sky_bleed(pc)
         if isolate:
             pc, up_vec, _ = isolate_point_cloud(pc, up=up)
         else:
@@ -322,3 +335,60 @@ def load_scan(path: str | os.PathLike, max_gaussians: int = 600_000, isolate: bo
                 up_vec = rep.ground["normal"]
     up_vec = np.asarray(up_vec, np.float64)
     return model, up_vec / np.linalg.norm(up_vec), path
+
+
+def sky_bleed_mask(pc: PointCloud) -> np.ndarray:
+    """Points coloured by the sky instead of the object (common on photogrammetry trees).
+
+    Photogrammetry projects sky pixels onto leaf points at silhouettes and
+    through gaps in the crown.  Flags clearly blue (hue 185-250 deg, blue
+    channel above green) or near-white points; glossy grey-green leaf
+    highlights are deliberately *not* flagged.
+    """
+    from .skeleton import rgb_to_hsv
+
+    if pc.colors is None:
+        return np.zeros(len(pc), bool)
+    c = pc.colors
+    hsv = rgb_to_hsv(c)
+    h, s, v = hsv[:, 0] * 360.0, hsv[:, 1], hsv[:, 2]
+    blue = (h >= 185) & (h <= 250) & (s > 0.15) & (v > 0.40) & (c[:, 2] > c[:, 1] + 0.03)
+    white = (s < 0.08) & (v > 0.75)
+    return blue | white
+
+
+def fix_sky_bleed(pc: PointCloud, k: int = 16, max_dist_factor: float = 6.0, max_fraction: float = 0.35,
+                  verbose: bool = True) -> PointCloud:
+    """Recolour sky-bleed points from their nearest object-coloured neighbours.
+
+    The geometry is kept (it is real leaves / twigs); only the colour is
+    wrong.  Sky points with no object neighbour within ``max_dist_factor`` x
+    the median point spacing are floaters and are removed.  If more than
+    ``max_fraction`` of the cloud looks like sky, the object itself is
+    probably white or blue and nothing is changed.
+    """
+    from scipy.spatial import cKDTree
+
+    sky = sky_bleed_mask(pc)
+    if not sky.any():
+        return pc
+    if sky.mean() > max_fraction:
+        if verbose:
+            print(f"sky bleed: {sky.mean():.0%} of the cloud is blue/white, assuming that is the object; skipped")
+        return pc
+    good = ~sky
+    tree = cKDTree(pc.points[good])
+    d, j = tree.query(pc.points[sky], k=k, workers=-1)
+    sample = pc.points[np.random.default_rng(0).choice(len(pc), min(len(pc), 100_000), replace=False)]
+    spacing = float(np.median(cKDTree(pc.points).query(sample, k=2)[0][:, 1]))
+    ok = d[:, 0] <= max_dist_factor * spacing
+    colors = pc.colors.copy()
+    good_colors = pc.colors[good]
+    colors[np.flatnonzero(sky)[ok]] = np.median(good_colors[j[ok]], axis=1)
+    keep = np.ones(len(pc), bool)
+    keep[np.flatnonzero(sky)[~ok]] = False
+    if verbose:
+        print(f"sky bleed: recoloured {ok.sum():,} points, removed {(~ok).sum():,} sky floaters "
+              f"({sky.mean():.1%} of the cloud flagged)")
+    out = PointCloud(pc.points, colors, pc.normals, pc.offset)
+    return out.subset(keep) if not keep.all() else out

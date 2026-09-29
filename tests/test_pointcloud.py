@@ -92,3 +92,31 @@ def test_isolate_point_cloud(small_tree):
     kept[cKDTree(pts).query(tree_pc.points, k=1)[1]] = True
     assert kept[is_tree].mean() > 0.97
     assert kept[~is_tree].mean() < 0.01
+
+
+def broad_oak_points(seed: int = 0) -> np.ndarray:
+    """Old-oak silhouette: short trunk, wide crown off-centre from it, branch curtains hanging to near the ground."""
+    rng = np.random.default_rng(seed)
+    a, z = rng.uniform(0, 2 * np.pi, 5000), rng.uniform(0.0, 7.0, 5000)
+    trunk = np.stack([0.8 * np.cos(a), 0.8 * np.sin(a), z], 1)
+    d = rng.normal(size=(100_000, 3))
+    d /= np.linalg.norm(d, axis=1, keepdims=True)
+    crown = d * [11.0, 11.0, 7.0] * rng.uniform(0.85, 1.0, (len(d), 1)) + [4.0, 0.0, 12.0]
+    rim = crown[(np.linalg.norm(crown[:, :2] - [4.0, 0.0], axis=1) > 9.0) & (crown[:, 2] < 12.0)]
+    curtain = rim[rng.choice(len(rim), len(rim) // 2)]
+    curtain[:, 2] = rng.uniform(2.0, curtain[:, 2])
+    return np.concatenate([trunk, crown, curtain])
+
+
+@pytest.mark.parametrize("up", ["+z", "-y", "+x"])
+def test_guess_up_broad_crown(up):
+    """Geometry only (no colour cue): the thin, light trunk end must win over the crown's sides.
+
+    The median-spread cue alone picked a crown side here (as on the real 200-year-old oak scan)."""
+    from gs4d.quaternion import rotation_between
+    from gs4d.skeleton import guess_up_axis, parse_up
+
+    R = rotation_between([0, 0, 1], parse_up(up))
+    pts = broad_oak_points() @ R.T
+    m = pointcloud_to_gaussians(PointCloud(pts, np.full((len(pts), 3), 0.5)), 40_000, verbose=False)
+    assert guess_up_axis(m) == up

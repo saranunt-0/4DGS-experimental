@@ -29,6 +29,19 @@ from gs4d.export import ReorientedFrames, export_all, up_rotation  # noqa: E402
 from gs4d.render import framing, render, to_uint8  # noqa: E402
 from gs4d.skeleton import horizontal_basis  # noqa: E402
 
+def write_static_views(tree, up, path, size):
+    """Four views around the static object-only splat (turntable at 0/90/180/270 deg)."""
+    import imageio.v2 as iio
+
+    cf, df = framing(tree)
+    e1, e2 = horizontal_basis(up)
+    views = []
+    for a in np.deg2rad([0, 90, 180, 270]):
+        d = np.cos(a) * e1 + np.sin(a) * e2
+        views.append(to_uint8(render(tree, look_at(cf - d * df * 0.8 + up * 0.06 * df, cf, up, size, size))))
+    iio.imwrite(path, np.concatenate(views, 1))
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("input")
@@ -36,6 +49,7 @@ def main(argv=None):
     ap.add_argument("--max-gaussians", type=int, default=600_000, help="point clouds are fitted to ~this many Gaussians")
     ap.add_argument("--up", default="auto", help="auto | +z | -y | ... | 'x,y,z'")
     ap.add_argument("--no-isolate", action="store_true", help="skip ground/background removal")
+    ap.add_argument("--no-fix-sky", action="store_true", help="keep sky-bleed colours (blue/white leaf points)")
     ap.add_argument("--tree-height-m", type=float, default=0.0, help="real tree height (0 = model units are metres)")
     ap.add_argument("--slices", type=int, default=48, help="skeleton resolution")
     ap.add_argument("--leaf-hue", type=float, default=95.0, help="foliage hue in degrees (35 for autumn)")
@@ -52,6 +66,7 @@ def main(argv=None):
     ap.add_argument("--formats", default="ply_sequence,usd,blender")
     ap.add_argument("--sh-degree", type=int, default=0)
     ap.add_argument("--reorient", default="Z", choices=["Z", "Y", "keep"])
+    ap.add_argument("--static-only", action="store_true", help="only write the static object-only 3DGS + renders")
     args = ap.parse_args(argv)
 
     out = Path(args.out)
@@ -60,9 +75,13 @@ def main(argv=None):
     up_arg = "auto" if args.up == "auto" else (
         parse_up(args.up) if args.up[0] in "+-" else np.array([float(v) for v in args.up.split(",")]))
     tree, up, src = load_scan(args.input, max_gaussians=args.max_gaussians, isolate=not args.no_isolate,
-                              up=up_arg, work_dir=out / "_input")
+                              up=up_arg, work_dir=out / "_input", fix_sky=not args.no_fix_sky)
     print(f"up = {np.round(up, 3).tolist()}; tree: {tree.summary()}")
     save_ply(tree, out / "tree_gaussians_static.ply")
+    write_static_views(tree, up, out / "static_views.png", args.preview_size)
+    if args.static_only:
+        print(f"static 3DGS: {out / 'tree_gaussians_static.ply'} ({time.time() - t0:.0f}s)")
+        return
 
     skel = extract_skeleton(tree, up=up, n_slices=args.slices)
     if args.leaf_hue != 95.0:

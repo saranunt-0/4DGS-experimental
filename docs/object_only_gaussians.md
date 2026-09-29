@@ -113,9 +113,12 @@ There are no photos to optimise against, so `gs4d.pointcloud` *fits* Gaussians t
   the Gaussian budget;
 * survey coordinates (UTM etc.) are recentred in float64 before the float32 cast.
 
-`load_scan()` (and `scripts/animate_pointcloud.py`) isolates the tree on a coarse fit first, then spends the
-whole budget on the tree's points. Limitation: fitted splats are view-independent (SH degree 0). For true 3DGS
-quality you still need the original photos (appendix of the notebook).
+`load_scan()` (and `scripts/animate_pointcloud.py`) first repairs **sky bleed**: leaf points coloured blue or
+white by the sky behind them are recoloured from their neighbours (`fix_sky_bleed`). It then isolates the tree on
+a coarse fit and spends the whole budget on the tree's points. Limitation: fitted splats are view-independent
+(SH degree 0). For true 3DGS quality you still need the original photos (appendix of the notebook), or
+render-to-splat distillation on a GPU. See [`object_asset_workflows.md`](object_asset_workflows.md) for how
+production tools make object-only assets and the full oak-scan walkthrough.
 
 ## 4. Tree-specific tips
 

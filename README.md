@@ -18,6 +18,7 @@ Left: full tree. Right: canopy close-up showing leaf flutter. The clip loops sea
 | 📓 [`notebooks/tree_wind_4dgs_demo.ipynb`](notebooks/tree_wind_4dgs_demo.ipynb) | Colab demo: tree → object-only clean-up → skeleton → wind → preview → export (runs on CPU; GPU optional) |
 | 🔬 [`docs/research_animated_3dgs.md`](docs/research_animated_3dgs.md) | State of the art (Sept 2026): animating static 3DGS, video → 4DGS, tree-specific work, Houdini 22 / Blender / USD tooling |
 | 🧹 [`docs/object_only_gaussians.md`](docs/object_only_gaussians.md) | How to get object-only splats without background artifacts, with measured results |
+| 🌳 [`docs/object_asset_workflows.md`](docs/object_asset_workflows.md) | How people make object-only 3DGS *assets* (capture, render-to-splat, Mesh2Splat, LiDAR, generative) and the oak-scan walkthrough |
 | 📦 [`docs/export_to_dcc.md`](docs/export_to_dcc.md) | File conventions and step-by-step import into Blender, Houdini, USD tools, viewers |
 | 🐍 `gs4d/` | The Python package behind the notebook |
 
