@@ -75,47 +75,73 @@ def statistical_outlier_mask(model: GaussianModel, k: int = 16, std_ratio: float
 
 
 def largest_component_mask(model: GaussianModel, voxel: float | None = None, keep_fraction: float = 0.02,
-                           max_grid: int = 256, min_opacity: float = 0.1, seed: np.ndarray | None = None) -> np.ndarray:
+                           max_grid: int = 256, min_opacity: float = 0.3, seed: np.ndarray | None = None,
+                           bridge: int = 2, min_count: int = 2) -> np.ndarray:
     """Keep the biggest spatially connected blob (plus blobs >= keep_fraction of it).
 
-    Occupancy is voxelised (26-connected) using reasonably opaque Gaussians;
-    every Gaussian then inherits the component of its voxel.  With ``seed``
+    Occupancy is voxelised (26-connected) using reasonably opaque Gaussians
+    (faint floaters cannot bridge separate objects); every Gaussian then
+    inherits the component of its voxel.  With ``seed``
     (boolean mask), components are ranked by how many seed Gaussians they
     contain instead of by size - "the blob(s) that the seed region touches".
+    ``bridge`` closes gaps of that many voxels (sparse crowns stay one blob).
     """
     x = model.means.astype(np.float64)
     lo, hi = np.quantile(x, 0.0005, axis=0), np.quantile(x, 0.9995, axis=0)
     ext = np.maximum(hi - lo, 1e-9)
     if voxel is None:
-        voxel = ext.max() / 128.0
+        # adapt to the splat spacing so that real structure has several splats per voxel
+        solid_x = x[model.opacities >= min_opacity]
+        if len(solid_x) > 50:
+            sub = solid_x if len(solid_x) <= 50_000 else solid_x[np.random.default_rng(0).choice(len(solid_x), 50_000, replace=False)]
+            spacing = float(np.median(cKDTree(sub).query(sub, k=5)[0][:, 4])) * np.sqrt(len(sub) / len(solid_x))
+        else:
+            spacing = 0.0
+        voxel = max(ext.max() / 128.0, 2.0 * spacing)
     voxel = max(voxel, ext.max() / max_grid)
     shape = np.minimum(np.ceil(ext / voxel).astype(int) + 1, max_grid)
     idx = np.clip(np.floor((x - lo) / voxel).astype(int), 0, shape - 1)
     solid = model.opacities >= min_opacity
-    occ = np.zeros(shape, bool)
-    occ[tuple(idx[solid].T)] = True
-    occ = ndimage.binary_closing(occ, iterations=1) | occ
-    lab, n = ndimage.label(occ, structure=np.ones((3, 3, 3)))
+    # a voxel is occupied only if it holds >= min_count solid splats: lone floaters cannot form bridges
+    counts = np.zeros(shape, np.int32)
+    np.add.at(counts, tuple(idx[solid].T), 1)
+    occ = counts >= min_count
+    if not occ.any():
+        occ = counts >= 1
+    # label a dilated grid so gaps of up to ``bridge`` voxels (between leaf clusters) stay connected
+    grown = ndimage.binary_dilation(occ, structure=np.ones((3, 3, 3)), iterations=bridge) if bridge > 0 else occ
+    lab, n = ndimage.label(grown, structure=np.ones((3, 3, 3)))
     if n == 0:
         return np.ones(len(x), bool)
     comp = lab[tuple(idx.T)]
     if seed is not None and np.any(seed):
-        sizes = np.bincount(comp[np.asarray(seed, bool) & solid], minlength=n + 1)[1:]
+        seeds = np.bincount(comp[np.asarray(seed, bool) & solid], minlength=n + 1)[1:]
+        members = np.bincount(comp[solid], minlength=n + 1)[1:]
+        if seeds.max() <= 0:
+            return np.ones(len(x), bool)
+        # a blob belongs to the object if it carries a real share of the seed region, or if it lies
+        # mostly inside it (a detached crown piece) - not if only its fringe pokes in (a nearby bush)
+        inside_frac = seeds / np.maximum(members, 1)
+        good = np.flatnonzero((seeds >= 0.2 * seeds.max()) |
+                              ((inside_frac >= 0.5) & (seeds >= keep_fraction * seeds.max()))) + 1
     else:
         sizes = np.bincount(lab.reshape(-1))[1:]
-    if sizes.max() <= 0:
-        return np.ones(len(x), bool)
-    good = np.flatnonzero(sizes >= keep_fraction * sizes.max()) + 1
+        if sizes.max() <= 0:
+            return np.ones(len(x), bool)
+        good = np.flatnonzero(sizes >= keep_fraction * sizes.max()) + 1
     inside = np.all((x >= lo - voxel) & (x <= hi + voxel), axis=1)
     return np.isin(comp, good) & inside
 
 
 def ground_mask(model: GaussianModel, up="+z", band: float = 0.015, iters: int = 300,
-                search_fraction: float = 0.25, keep_radius: float = 0.0, seed: int = 0) -> tuple[np.ndarray, dict]:
+                search_fraction: float = 0.25, keep_radius: float = 0.0, seed: int = 0,
+                fringe: float = 3.0) -> tuple[np.ndarray, dict]:
     """RANSAC-fit the ground plane under the object and drop Gaussians on/under it.
 
     ``band`` and ``keep_radius`` are fractions of the object height;
-    ``keep_radius`` protects a disc around the trunk base (roots).
+    ``keep_radius`` protects a disc around the trunk base (roots); ``fringe``
+    also removes the ground layer up to ``fringe`` x the measured ground
+    thickness outside the trunk footprint (grass, litter).
     Returns ``(keep_mask, info)``.
     """
     up = parse_up(up)
@@ -178,6 +204,21 @@ def ground_mask(model: GaussianModel, up="+z", band: float = 0.015, iters: int =
     sigma = float(np.std(signed[np.abs(signed) < thr]))
     cut = min(max(2.5 * sigma, 0.1 * thr), thr)
     keep = signed > cut
+    if fringe > 1.0:
+        # grass / leaf litter / fitted splats make the ground a layer, not a plane: also drop the
+        # thin layer up to fringe*cut everywhere outside the trunk's footprint
+        band_hi = fringe * cut
+        trunk = (signed > band_hi) & (signed < band_hi + 0.12 * height)
+        if trunk.sum() >= 10:
+            tp = x[trunk] - np.outer(signed[trunk], n)
+            c0 = np.median(tp, axis=0)
+            rt = np.linalg.norm(tp - c0, axis=1)
+            core = rt <= np.quantile(rt, 0.5) * 2.0          # ignore low branches in the band
+            c0 = np.median(tp[core], axis=0)
+            radius = np.quantile(np.linalg.norm(tp[core] - c0, axis=1), 0.95) * 1.3 + cut
+            proj = x - np.outer(signed, n)
+            outside = np.linalg.norm(proj - c0, axis=1) > radius
+            keep &= ~((signed <= band_hi) & outside)
     if keep_radius > 0:
         base = x[np.abs(signed) < thr]
         trunk = np.median(x[(signed > thr) & (signed < 5 * thr)], axis=0) if np.any((signed > thr) & (signed < 5 * thr)) else base.mean(0)
@@ -240,7 +281,7 @@ def cameras_focus_point(cameras) -> np.ndarray:
     return np.linalg.lstsq(A, b, rcond=None)[0]
 
 
-def estimate_object_column(model: GaussianModel, up="+z", grid: int = 96, min_opacity: float = 0.1) -> tuple[np.ndarray, float]:
+def estimate_object_column(model: GaussianModel, up="+z", grid: int = 96, min_opacity: float = 0.3) -> tuple[np.ndarray, float]:
     """Find the vertical column holding the main standing object.
 
     Works even when background Gaussians outnumber the object: fit the ground
@@ -269,10 +310,12 @@ def estimate_object_column(model: GaussianModel, up="+z", grid: int = 96, min_op
     ij = np.floor((uv[above] - lo) / cell).astype(int)
     ok = np.all((ij >= 0) & (ij < grid), axis=1)
     hist = np.zeros((grid, grid))
-    np.add.at(hist, tuple(ij[ok].T), np.clip(h[above][ok], 0, None))
+    # height x opacity weighting: tall, solid structure dominates; faint floaters barely count
+    w = np.clip(h[above][ok], 0, None) * m.opacities[above][ok]
+    np.add.at(hist, tuple(ij[ok].T), w)
     dens = ndimage.gaussian_filter(hist, 1.5)
     peak = np.unravel_index(np.argmax(dens), dens.shape)
-    blob, _ = ndimage.label(dens > 0.08 * dens[peak])
+    blob, _ = ndimage.label(dens > 0.12 * dens[peak])
     region = blob == blob[peak]
     cells = np.argwhere(region)
     c_uv = lo + (np.asarray(peak) + 0.5) * cell

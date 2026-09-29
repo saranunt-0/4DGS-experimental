@@ -255,7 +255,7 @@ def render_cpu(
 def gsplat_available() -> bool:
     try:
         import torch  # noqa: F401
-        import gsplat  # noqa: F401
+        import gsplat  # noqa: F401  (availability check)
 
         return bool(torch.cuda.is_available())
     except Exception:

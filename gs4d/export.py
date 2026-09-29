@@ -72,7 +72,7 @@ def export_usd(
     Conventions follow the schema: linear scales, linear [0,1] opacity, raw
     SH coefficients (DC first, then bands in the reference 3DGS order).
     """
-    from pxr import Gf, Sdf, Usd, UsdGeom, UsdVol, Vt  # noqa: F401
+    from pxr import Gf, Usd, UsdGeom, UsdVol, Vt
 
     if not hasattr(UsdVol, "ParticleField3DGaussianSplat"):
         raise RuntimeError("usd-core >= 26.03 is required (pip install -U usd-core)")

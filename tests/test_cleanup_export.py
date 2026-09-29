@@ -75,7 +75,7 @@ def test_blender_import(tmp_path, short_anim):
 
     import bpy
 
-    res = export_all(short_anim, tmp_path, "t", formats=("blender",))
+    export_all(short_anim, tmp_path, "t", formats=("blender",))
     sys.path.insert(0, str(tmp_path))
     import gs4d_import_sequence as g
 

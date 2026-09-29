@@ -412,7 +412,6 @@ def extract_skeleton(
 def subtree_sizes(parents: np.ndarray, weights: np.ndarray) -> np.ndarray:
     """Sum of ``weights`` over each joint's subtree."""
     parents = np.asarray(parents, np.int64)
-    J = len(parents)
     tmp = TreeSkeleton.__new__(TreeSkeleton)
     tmp.parents = parents
     depth = TreeSkeleton._compute_depth(tmp)
@@ -431,9 +430,8 @@ def auto_leafness(
     hue_center_deg: float = 95.0,
 ) -> np.ndarray:
     """Combine a colour cue (green) with a structural cue (thin, peripheral joints)."""
-    J = len(parents)
     if counts_per_node is None:
-        counts_per_node = np.bincount(np.maximum(bind, 0), minlength=J).astype(np.float64)
+        counts_per_node = np.bincount(np.maximum(bind, 0), minlength=len(parents)).astype(np.float64)
     sub = subtree_sizes(parents, counts_per_node)
     s = np.sqrt(sub / max(sub.max(), 1e-9))  # pipe-model "thickness" 0..1
     thin = 1.0 - _smoothstep(s[np.maximum(bind, 0)], 0.15, 0.45)

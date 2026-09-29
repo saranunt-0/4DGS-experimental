@@ -51,7 +51,7 @@ def _read_bin(path: Path):
     with open(path / "images.bin", "rb") as f:
         (n,) = struct.unpack("<Q", f.read(8))
         for _ in range(n):
-            iid = struct.unpack("<i", f.read(4))[0]
+            f.seek(4, 1)  # image id (images are matched by name)
             q = np.array(struct.unpack("<4d", f.read(32)))
             t = np.array(struct.unpack("<3d", f.read(24)))
             cid = struct.unpack("<i", f.read(4))[0]

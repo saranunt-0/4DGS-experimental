@@ -1,0 +1,94 @@
+import numpy as np
+import pytest
+
+from gs4d.gaussians import GaussianModel
+from gs4d.io_ply import load_gaussians
+from gs4d.pointcloud import PointCloud, isolate_point_cloud, pointcloud_to_gaussians, read_point_cloud
+from gs4d.quaternion import quat_to_matrix
+
+
+def sample_points(model: GaussianModel, n: int, seed: int = 0):
+    """Scanner-like points sampled from the surfaces of a splat model."""
+    rng = np.random.default_rng(seed)
+    s = model.scales
+    area = s[:, 0] * s[:, 1] + s[:, 1] * s[:, 2] + s[:, 0] * s[:, 2]
+    idx = rng.choice(len(model), n, p=area / area.sum())
+    z = np.clip(rng.normal(size=(n, 3)), -1.8, 1.8) * s[idx]
+    pts = model.means[idx] + np.einsum("nij,nj->ni", quat_to_matrix(model.quats[idx].astype(np.float64)), z)
+    return pts.astype(np.float64), model.rgb[idx]
+
+
+def write_ply(path, pts, rgb):
+    dt = np.dtype([("x", "<f8"), ("y", "<f8"), ("z", "<f8"), ("red", "u1"), ("green", "u1"), ("blue", "u1")])
+    a = np.empty(len(pts), dt)
+    a["x"], a["y"], a["z"] = pts.T
+    c = (rgb * 255 + 0.5).astype(np.uint8)
+    a["red"], a["green"], a["blue"] = c.T
+    hdr = (f"ply\nformat binary_little_endian 1.0\nelement vertex {len(pts)}\nproperty double x\nproperty double y\n"
+           "property double z\nproperty uchar red\nproperty uchar green\nproperty uchar blue\nend_header\n")
+    with open(path, "wb") as f:
+        f.write(hdr.encode())
+        f.write(a.tobytes())
+
+
+@pytest.fixture(scope="module")
+def scan(small_tree, tmp_path_factory):
+    from gs4d.synthetic import make_captured_scene
+
+    m, _ = small_tree
+    scene, _ = make_captured_scene(m, n_floaters=0, n_sky=0, n_clutter=0, n_ground=6000, ground_radius=1.0)
+    pts, rgb = sample_points(scene, 200_000)
+    utm = np.array([512345.678, 4123456.789, 87.0])
+    path = tmp_path_factory.mktemp("scan") / "oak.ply"
+    write_ply(path, pts + utm, rgb)
+    return path, pts, rgb, m
+
+
+def test_read_recenters_survey_coordinates(scan):
+    path, pts, rgb, _ = scan
+    pc = read_point_cloud(path)
+    assert np.all(np.abs(pc.offset[:2]) > 1e5) and np.abs(pc.points).max() < 200
+    assert np.allclose(pc.points + pc.offset, pts + [512345.678, 4123456.789, 87.0], atol=1e-6)
+    assert np.allclose(pc.colors, rgb, atol=1 / 255 + 1e-6)
+
+
+@pytest.mark.parametrize("mode,target", [("surfel", 50_000), ("voxel", 30_000)])
+def test_fit_modes(scan, mode, target):
+    path, *_ = scan
+    pc = read_point_cloud(path)
+    g = pointcloud_to_gaussians(pc, target_count=target, mode=mode, verbose=False)
+    assert 0.5 * target < len(g) <= 1.3 * target
+    assert np.isfinite(g.means).all() and np.isfinite(g.log_scales).all()
+    assert np.allclose(np.linalg.norm(g.quats, axis=1), 1, atol=1e-5)
+    # splats hug the points: every Gaussian centre is near the cloud
+    from scipy.spatial import cKDTree
+    d, _ = cKDTree(pc.points).query(g.means, k=1)
+    assert np.quantile(d, 0.99) < 0.05 * np.ptp(pc.points, axis=0).max()
+
+
+def test_load_gaussians_accepts_point_clouds(scan, tmp_path):
+    path, pts, rgb, _ = scan
+    g = load_gaussians(path, max_points=20_000)
+    assert len(g) <= 26_000 and g.sh_degree == 0
+    xyz = tmp_path / "oak.xyz"
+    np.savetxt(xyz, np.concatenate([pts[:3000], rgb[:3000] * 255], 1), fmt="%.5f")
+    g2 = load_gaussians(xyz)
+    assert len(g2) == 3000
+
+
+def test_isolate_point_cloud(small_tree):
+    from gs4d.synthetic import make_captured_scene
+
+    m, _ = small_tree
+    scene, _ = make_captured_scene(m, n_floaters=0, n_sky=0, n_clutter=0, n_ground=6000, ground_radius=1.0)
+    pts, rgb = sample_points(scene, 120_000)
+    # label: points sampled from tree splats vs ground splats
+    from scipy.spatial import cKDTree
+    _, nearest = cKDTree(scene.means).query(pts, k=1)
+    is_tree = nearest < len(m)
+    tree_pc, up, rep = isolate_point_cloud(PointCloud(pts, rgb), up="auto", coarse_count=60_000, verbose=False)
+    assert np.dot(up, [0, 0, 1]) > 0.99
+    kept = np.zeros(len(pts), bool)
+    kept[cKDTree(pts).query(tree_pc.points, k=1)[1]] = True
+    assert kept[is_tree].mean() > 0.97
+    assert kept[~is_tree].mean() < 0.01

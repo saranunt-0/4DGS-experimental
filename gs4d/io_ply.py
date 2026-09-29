@@ -105,28 +105,21 @@ def _sorted_props(cols: dict, prefix: str) -> list[str]:
     return [k for _, k in sorted(found)]
 
 
-def _points_to_gaussians(cols: dict) -> GaussianModel:
-    """Turn a plain coloured point cloud into isotropic Gaussians."""
-    from scipy.spatial import cKDTree
+def _points_to_gaussians(cols: dict, target_count: int = 800_000) -> GaussianModel:
+    """Plain point cloud (x, y, z[, red, green, blue]) -> fitted anisotropic Gaussians."""
+    from .pointcloud import point_cloud_from_columns, pointcloud_to_gaussians
 
-    xyz = np.stack([cols["x"], cols["y"], cols["z"]], 1).astype(np.float64)
-    if all(c in cols for c in ("red", "green", "blue")):
-        rgb = np.stack([cols["red"], cols["green"], cols["blue"]], 1).astype(np.float64)
-        rgb = rgb / (255.0 if rgb.max() > 1.0 else 1.0)
-    else:
-        rgb = np.full((len(xyz), 3), 0.6)
-    k = min(4, len(xyz) - 1)
-    d, _ = cKDTree(xyz).query(xyz, k=k + 1)
-    s = np.clip(d[:, 1:].mean(1), 1e-5, None) * 0.7
-    quats = np.tile([1.0, 0.0, 0.0, 0.0], (len(xyz), 1))
-    return GaussianModel.from_activated(xyz, quats, np.repeat(s[:, None], 3, 1), np.full(len(xyz), 0.9), rgb)
+    pc = point_cloud_from_columns(cols)
+    if np.any(pc.offset != 0):
+        print(f"note: large coordinates recentred by subtracting {pc.offset.tolist()}")
+    return pointcloud_to_gaussians(pc, target_count=target_count)
 
 
-def gaussians_from_columns(cols: dict[str, np.ndarray]) -> GaussianModel:
+def gaussians_from_columns(cols: dict[str, np.ndarray], max_points: int = 800_000) -> GaussianModel:
     if not all(c in cols for c in ("x", "y", "z")):
         raise ValueError("PLY vertices need x, y, z")
     if "opacity" not in cols or "scale_0" not in cols:
-        return _points_to_gaussians(cols)
+        return _points_to_gaussians(cols, target_count=max_points)
     n = len(cols["x"])
     means = np.stack([cols["x"], cols["y"], cols["z"]], 1)
     scale_names = _sorted_props(cols, "scale_")
@@ -169,13 +162,24 @@ def read_splat(path: str | os.PathLike) -> GaussianModel:
     return GaussianModel.from_activated(pos, quat, scale, rgba[:, 3], rgba[:, :3])
 
 
-def load_gaussians(path: str | os.PathLike) -> GaussianModel:
+def load_gaussians(path: str | os.PathLike, max_points: int = 800_000) -> GaussianModel:
+    """Load a 3DGS ``.ply`` / ``.splat``, or a *point cloud* (``.ply`` without
+    splat attributes, ``.xyz/.txt/.pts/.csv/.npy/.las/.laz``) which is converted
+    to fitted Gaussians (at most ~``max_points`` of them, see gs4d.pointcloud)."""
     path = Path(path)
-    if path.suffix.lower() == ".splat":
+    ext = path.suffix.lower()
+    if ext == ".splat":
         return read_splat(path)
-    if path.suffix.lower() == ".ply":
-        return gaussians_from_columns(read_ply_vertices(path))
-    raise ValueError(f"unsupported file type {path.suffix!r} (expected .ply or .splat)")
+    if ext == ".ply":
+        return gaussians_from_columns(read_ply_vertices(path), max_points=max_points)
+    if ext in (".xyz", ".txt", ".pts", ".csv", ".npy", ".las", ".laz"):
+        from .pointcloud import pointcloud_to_gaussians, read_point_cloud
+
+        pc = read_point_cloud(path)
+        if np.any(pc.offset != 0):
+            print(f"note: large coordinates recentred by subtracting {pc.offset.tolist()}")
+        return pointcloud_to_gaussians(pc, target_count=max_points)
+    raise ValueError(f"unsupported file type {path.suffix!r}")
 
 
 def save_ply(

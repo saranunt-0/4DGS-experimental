@@ -1,12 +1,14 @@
 """Execute the Colab notebook end-to-end with a tiny workload (GS4D_NOTEBOOK_TEST=1)."""
 
 import importlib.util
+import sys
 import os
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 NB = ROOT / "notebooks" / "tree_wind_4dgs_demo.ipynb"
 
 pytestmark = pytest.mark.skipif(
@@ -39,3 +41,31 @@ def test_notebook_is_clean():
     assert all(not c.get("outputs") for c in nb.cells if c.cell_type == "code")
     assert nb.metadata.get("accelerator") == "GPU"
     assert os.path.exists(ROOT / "scripts" / "build_notebook.py")
+
+
+def test_notebook_scan_path(monkeypatch, tmp_path, small_tree):
+    """The point-cloud (zip) branch: isolate -> fit -> skeleton -> wind -> export."""
+    import zipfile
+
+    import nbformat
+    from nbclient import NotebookClient
+
+    from gs4d.synthetic import make_captured_scene
+    from test_pointcloud import sample_points, write_ply
+
+    m, _ = small_tree
+    scene, _ = make_captured_scene(m, n_floaters=0, n_sky=0, n_clutter=0, n_ground=4000, ground_radius=1.0)
+    pts, rgb = sample_points(scene, 60_000)
+    write_ply(tmp_path / "scan.ply", pts + [512345.0, 4123456.0, 87.0], rgb)
+    with zipfile.ZipFile(tmp_path / "oak.zip", "w") as z:
+        z.write(tmp_path / "scan.ply", "oak/scan.ply")
+
+    monkeypatch.setenv("GS4D_NOTEBOOK_TEST", "1")
+    monkeypatch.setenv("GS4D_TEST_SCAN", str(tmp_path / "oak.zip"))
+    nb = nbformat.read(NB, as_version=4)
+    NotebookClient(nb, timeout=600, kernel_name="python3", resources={"metadata": {"path": str(NB.parent)}}).execute()
+    errors = [o for c in nb.cells if c.cell_type == "code" for o in c.get("outputs", []) if o.output_type == "error"]
+    assert not errors
+    logs = "".join(o.get("text", "") for c in nb.cells if c.cell_type == "code" for o in c.get("outputs", []))
+    assert "object-only points" in logs and "already isolated" in logs
+    assert (ROOT / "outputs" / "tree_wind" / "ply_sequence" / "tree_wind_0001.ply").exists()
