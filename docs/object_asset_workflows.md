@@ -54,7 +54,7 @@ isolation from this repo:
 
 ```bash
 python scripts/animate_pointcloud.py test_asset/200-year-old-oak-tree.zip --out outputs/oak \
-    --max-gaussians 600000 --static-only          # static object-only 3DGS only (~2-3 min on 4 CPUs)
+    --max-gaussians 500000 --static-only          # static object-only 3DGS only (~3-4 min on 4 CPUs)
 ```
 
 | Step | Result on the oak |
@@ -62,18 +62,24 @@ python scripts/animate_pointcloud.py test_asset/200-year-old-oak-tree.zip --out 
 | Nested zip → point cloud | `source/oak_RGB_2cm.zip` opened automatically |
 | Sky bleed repair | 513,491 points recoloured (blue, and grey inside foliage), 592 sky floaters removed |
 | Up axis | **+Z**. The first heuristic said +Y: this oak's crown is wider than it is tall and hangs down beside a short trunk. The detector now also uses a *mass* cue (the trunk end is the lightest end); regression test `test_guess_up_broad_crown` |
-| Isolation (ground, clutter, floaters) | No ground plane in this scan. 0.6% statistical outliers removed; 4,559,656 points kept |
-| Gaussian fitting | Voxel mode (~7 points per splat): each splat gets the mean colour and **covariance** of its voxel's points, so it is flat on leaves and bark and elongated along twigs |
-| Output | `tree_gaussians_static.ply`, a standard 3DGS PLY (SH degree 0) that opens in SuperSplat, Postshot, KIRI 3DGS Render, Houdini 22 and this repo |
+| Isolation (ground, clutter, floaters) | No ground plane in this scan. ~0.6% statistical outliers removed; 4.57M points kept |
+| Gaussian fitting | Voxel mode (11.8 cm voxels, median 5 / mean 9 points per splat, 500,144 splats): each splat gets the mean colour and **covariance** of its voxel's points, so it is flat on leaves and bark and elongated along twigs |
+| Placement | Trunk axis moved to the origin, trunk base at z = 0 (metres, +Z up), so it drops straight into a DCC scene |
+| Output | [`assets/oak/oak_3dgs_500k.ply`](../assets/oak/oak_3dgs_500k.ply) (34 MB), a standard 3DGS PLY (SH degree 0) that opens in SuperSplat, Postshot, KIRI 3DGS Render, Houdini 22 and this repo |
+| Animation | 2,727-joint skeleton, 93.6% of splats flagged as leaves; 6 m/s breeze with light gusts, 4 s seamless loop at 24 fps. Branch tips sway up to ~1 m (p99), the trunk barely moves. The 96-frame PLY sequence (500,144 splats per frame) imported into Blender 5.0 headless |
 
 Then the tree is animated like any other splat tree: skeleton by geodesic slicing, wind oscillators, forward
 kinematics and leaf flutter (see the README).
 
 ### Honest limitations of route 3
 * **No view-dependent colour.** Leaves don't sparkle as you orbit; the colour is the scan's baked colour.
-* **Detail is capped by the scan.** 2 cm points → ~13 cm splats at 600k. Individual leaves blur into foliage clumps
+* **Detail is capped by the scan.** 2 cm points → ~12 cm splats at 500k. Individual leaves blur into foliage clumps
   up close. Raise `--max-gaussians` (the file grows ~68 bytes per splat) or crop to a region.
 * **Scan lighting is baked in.** Relighting needs a normal-aware renderer (Houdini 22, KIRI 5).
+* **A few pale highlights remain.** 1.2% of splats are still near-grey (sunlit leaves, or sky mixed into a voxel
+  with leaves). Pushing the detector further starts repainting real highlights.
+* **The file is big for its detail.** 68 bytes per splat, uncompressed. For the web, convert it in SuperSplat to a
+  compressed PLY or SOG (several times smaller).
 
 ### Upgrade path (GPU, e.g. Colab): route 2 on the same scan
 1. Render the fitted splat (or the raw points) from 150-300 cameras on two orbits and a dome, **with alpha**
