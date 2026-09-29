@@ -120,3 +120,27 @@ def test_guess_up_broad_crown(up):
     pts = broad_oak_points() @ R.T
     m = pointcloud_to_gaussians(PointCloud(pts, np.full((len(pts), 3), 0.5)), 40_000, verbose=False)
     assert guess_up_axis(m) == up
+
+
+def test_fix_sky_bleed():
+    """Blue and grey sky colours inside foliage are repainted; white bark and green leaves are untouched."""
+    from gs4d.pointcloud import fix_sky_bleed
+
+    rng = np.random.default_rng(0)
+    d = rng.normal(size=(20000, 3))
+    crown = d / np.linalg.norm(d, axis=1, keepdims=True) * 2.5 * rng.random((20000, 1)) ** (1 / 3) + [0, 0, 6]
+    leaf = np.clip(rng.normal([0.20, 0.30, 0.05], 0.03, (len(crown), 3)), 0, 1)
+    sky = rng.random(len(crown)) < 0.1
+    leaf[sky] = np.where(rng.random((sky.sum(), 1)) < 0.5, [0.55, 0.70, 0.95], [0.66, 0.68, 0.67])
+    a, z = rng.uniform(0, 2 * np.pi, 3000), rng.uniform(0, 3.3, 3000)
+    trunk = np.stack([0.4 * np.cos(a), 0.4 * np.sin(a), z], 1)       # white birch bark below the crown
+    bark = np.full((len(trunk), 3), 0.85)
+    floaters = rng.uniform(-1, 1, (50, 3)) + [8, 8, 8]
+    pts = np.concatenate([crown, trunk, floaters])
+    col = np.concatenate([leaf, bark, np.tile([0.55, 0.70, 0.95], (50, 1))])
+    out = fix_sky_bleed(PointCloud(pts, col), verbose=False)
+    assert len(out) == len(crown) + len(trunk)                        # only the sky floaters are removed
+    fixed = out.colors[: len(crown)][sky]
+    assert np.all(fixed[:, 1] > fixed[:, 2] + 0.1)                    # repainted green, not blue / grey
+    assert np.allclose(out.colors[: len(crown)][~sky], leaf[~sky])    # real leaves untouched
+    assert np.allclose(out.colors[len(crown):], 0.85)                 # white bark kept

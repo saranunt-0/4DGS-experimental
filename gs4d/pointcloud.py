@@ -337,14 +337,21 @@ def load_scan(path: str | os.PathLike, max_gaussians: int = 600_000, isolate: bo
     return model, up_vec / np.linalg.norm(up_vec), path
 
 
-def sky_bleed_mask(pc: PointCloud) -> np.ndarray:
+def sky_bleed_mask(pc: PointCloud, k: int = 16, min_leafy: float = 0.2) -> np.ndarray:
     """Points coloured by the sky instead of the object (common on photogrammetry trees).
 
     Photogrammetry projects sky pixels onto leaf points at silhouettes and
-    through gaps in the crown.  Flags clearly blue (hue 185-250 deg, blue
-    channel above green) or near-white points; glossy grey-green leaf
-    highlights are deliberately *not* flagged.
+    through gaps in the crown.  Flags
+
+    * clearly blue points (hue 185-250 deg, blue channel above green), and
+    * neutral white / grey points (saturation < 0.15, much brighter than the
+      cloud's median) whose ``k`` nearest neighbours are at least
+      ``min_leafy`` foliage-coloured - an overcast sky is grey, and grey
+      *inside foliage* is sky, while white bark (birch) or a white object
+      has no leaves around it and is left alone.
     """
+    from scipy.spatial import cKDTree
+
     from .skeleton import rgb_to_hsv
 
     if pc.colors is None:
@@ -353,8 +360,12 @@ def sky_bleed_mask(pc: PointCloud) -> np.ndarray:
     hsv = rgb_to_hsv(c)
     h, s, v = hsv[:, 0] * 360.0, hsv[:, 1], hsv[:, 2]
     blue = (h >= 185) & (h <= 250) & (s > 0.15) & (v > 0.40) & (c[:, 2] > c[:, 1] + 0.03)
-    white = (s < 0.08) & (v > 0.75)
-    return blue | white
+    grey = (s < 0.15) & (v > max(0.45, 1.8 * float(np.median(v)))) & ~blue
+    if grey.any():
+        leafy = (h >= 40) & (h <= 160) & (s > 0.25)
+        _, j = cKDTree(pc.points).query(pc.points[grey], k=min(k + 1, len(pc)), workers=-1)
+        grey[np.flatnonzero(grey)] = leafy[j[:, 1:]].mean(1) >= min_leafy
+    return blue | grey
 
 
 def fix_sky_bleed(pc: PointCloud, k: int = 16, max_dist_factor: float = 6.0, max_fraction: float = 0.35,

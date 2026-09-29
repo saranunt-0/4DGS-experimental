@@ -31,12 +31,19 @@ crown's silhouette and through gaps between leaves. The geometry is real, but th
 fitted or trained splat then shows a blue-grey haze on the crown. Survey tools address this with
 **select-by-colour** clean-up (3Dsurvey) or by **annotating sky** in the images before densification (Pix4D).
 
-The oak scan has exactly this problem: 7.9% of its 4.6M points are sky-coloured (bright blue or near-white).
-Deleting them would thin out the crown's edge. Instead, `gs4d.pointcloud.fix_sky_bleed` **keeps the points and
-repaints them** with the median colour of their 16 nearest non-sky neighbours. It deletes only sky points with no
-object neighbour nearby (real floaters: 667 of them). The detector is deliberately narrow (clearly blue hue with
-the blue channel above green, or near-white). A looser version flagged 12%, including glossy grey-green leaves.
-If more than 35% of a cloud looks like sky, the object itself is probably white or blue, and the fix does nothing.
+The oak scan has exactly this problem. 11.1% of its 4.6M points are sky-coloured:
+* clearly **blue**;
+* a **neutral grey**, the colour of an overcast sky. The median is RGB (0.66, 0.68, 0.67), three times brighter
+  than the median leaf colour (0.20, 0.22, 0.03).
+
+Deleting these points would thin out the crown's edge. Instead, `gs4d.pointcloud.fix_sky_bleed` **keeps the points
+and repaints them** with the median colour of their 16 nearest non-sky neighbours. It deletes only sky points with
+no object neighbour nearby (real floaters).
+
+Grey is only treated as sky when it sits **inside foliage** (at least 20% of its neighbours are leaf-green).
+Otherwise white birch bark or a white object would be repainted. The first version flagged every near-white point,
+and the test showed it deleted a white birch trunk. If more than 35% of a cloud looks like sky, the object itself is
+probably white or blue, and the fix does nothing.
 
 ## 3. What we did with the 200-year-old oak (`test_asset/200-year-old-oak-tree.zip`)
 
@@ -53,7 +60,7 @@ python scripts/animate_pointcloud.py test_asset/200-year-old-oak-tree.zip --out 
 | Step | Result on the oak |
 |---|---|
 | Nested zip → point cloud | `source/oak_RGB_2cm.zip` opened automatically |
-| Sky bleed repair | 365,843 points recoloured, 667 sky floaters removed |
+| Sky bleed repair | 513,491 points recoloured (blue, and grey inside foliage), 592 sky floaters removed |
 | Up axis | **+Z**. The first heuristic said +Y: this oak's crown is wider than it is tall and hangs down beside a short trunk. The detector now also uses a *mass* cue (the trunk end is the lightest end); regression test `test_guess_up_broad_crown` |
 | Isolation (ground, clutter, floaters) | No ground plane in this scan. 0.6% statistical outliers removed; 4,559,656 points kept |
 | Gaussian fitting | Voxel mode (~7 points per splat): each splat gets the mean colour and **covariance** of its voxel's points, so it is flat on leaves and bark and elongated along twigs |

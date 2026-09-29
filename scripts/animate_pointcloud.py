@@ -67,6 +67,7 @@ def main(argv=None):
     ap.add_argument("--sh-degree", type=int, default=0)
     ap.add_argument("--reorient", default="Z", choices=["Z", "Y", "keep"])
     ap.add_argument("--static-only", action="store_true", help="only write the static object-only 3DGS + renders")
+    ap.add_argument("--keep-position", action="store_true", help="keep scan coordinates (default: trunk base at the origin)")
     args = ap.parse_args(argv)
 
     out = Path(args.out)
@@ -77,13 +78,23 @@ def main(argv=None):
     tree, up, src = load_scan(args.input, max_gaussians=args.max_gaussians, isolate=not args.no_isolate,
                               up=up_arg, work_dir=out / "_input", fix_sky=not args.no_fix_sky)
     print(f"up = {np.round(up, 3).tolist()}; tree: {tree.summary()}")
+    skel = extract_skeleton(tree, up=up, n_slices=args.slices)
+    if not args.keep_position:
+        # DCC-friendly: trunk axis (skeleton root) through the origin, lowest trunk splat at height 0
+        root = np.flatnonzero(skel.parents == -1)
+        base = skel.pivots[root].mean(0)
+        on_root = np.isin(skel.bind, root)
+        if on_root.any():
+            base = base + (float((tree.means[on_root] @ up).min()) - float(base @ up)) * up
+        tree = tree.transformed(translation=-base)
+        skel.pivots = skel.pivots - base
+        print(f"moved the trunk base {np.round(base, 3).tolist()} to the origin")
     save_ply(tree, out / "tree_gaussians_static.ply")
     write_static_views(tree, up, out / "static_views.png", args.preview_size)
     if args.static_only:
         print(f"static 3DGS: {out / 'tree_gaussians_static.ply'} ({time.time() - t0:.0f}s)")
         return
 
-    skel = extract_skeleton(tree, up=up, n_slices=args.slices)
     if args.leaf_hue != 95.0:
         from gs4d.skeleton import auto_leafness
         skel.leafness = auto_leafness(tree, skel.parents, skel.bind, hue_center_deg=args.leaf_hue)

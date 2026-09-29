@@ -52,10 +52,23 @@ python scripts/animate_pointcloud.py oak-scan.zip --out outputs/oak --tree-heigh
 # -> outputs/oak/preview.mp4, preview.gif, export/ply_sequence/*.ply, export/tree_wind.usdc, export/gs4d_import_sequence.py
 ```
 
-The tree is separated from the ground on a coarse fit. Its points are then fitted with oriented Gaussians
-(`gs4d.pointcloud`), skeletonised and animated. A point cloud has no photos, so the splats are fitted rather
-than optimised (no view-dependent shine). In Colab, pick `SOURCE = "google drive"` to load the scan straight
-from your Drive.
+Sky-coloured leaf points are repainted first. The tree is then separated from the ground on a coarse fit, its
+points are fitted with oriented Gaussians (`gs4d.pointcloud`), and the result is skeletonised and animated. A point
+cloud has no photos, so the splats are fitted rather than optimised (no view-dependent shine). In Colab, pick
+`SOURCE = "oak scan (repo)"` for the bundled oak, or `"google drive"` for your own scan.
+
+### Real scan: the 200-year-old oak
+
+![200-year-old oak scan as a wind-animated 3DGS: full tree and crown close-up](docs/assets/oak_wind.gif)
+
+*`test_asset/200-year-old-oak-tree.zip` (4.6M photogrammetry points) → **500k-splat object-only 3DGS**
+([`assets/oak/oak_3dgs_500k.ply`](assets/oak/oak_3dgs_500k.ply), trunk base at the origin, +Z up) → gentle
+6 m/s breeze, 4 s seamless loop. How, and why this route: [`docs/object_asset_workflows.md`](docs/object_asset_workflows.md).*
+
+```bash
+python scripts/animate_pointcloud.py test_asset/200-year-old-oak-tree.zip --out outputs/oak \
+    --max-gaussians 500000 --speed 6 --gustiness 0.5 --trunk-stiffness 2 --flutter-deg 20 --direction 180
+```
 
 Train an object-only tree from a phone video (GPU): see the notebook appendix or `gs4d/train.py`
 (frames → pycolmap → BiRefNet masks → masked gsplat training with a random background + alpha loss).
@@ -74,12 +87,14 @@ Train an object-only tree from a phone video (GPU): see the notebook appendix or
 
 ## Verified
 
-`pytest` (30 tests) covers: PLY/`.splat` round-trips in the reference layout, quaternion and covariance maths, the
+`pytest` (34 tests) covers: PLY/`.splat` round-trips in the reference layout, quaternion and covariance maths, the
 CPU renderer, zero wind = identity, downwind bending, seamless loops, leaf-only flutter, skeleton extraction for
-three up axes, object isolation and mask voting on synthetic captures, animated USD read-back, the COLMAP reader,
-the masked-training loop (with a mock rasteriser), and **importing the PLY sequence into Blender 5.0 (headless) and
-checking the per-frame instance positions**, and executing the whole notebook end-to-end in CI mode
-(`GS4D_NOTEBOOK_TEST=1`). The pycolmap stage was run on 36 synthetic views (36/36 registered).
+three up axes, the up axis of a broad, drooping oak-like crown, sky-bleed repair (white bark left intact), object
+isolation and mask voting on synthetic captures, animated USD read-back, the COLMAP reader, the masked-training loop
+(with a mock rasteriser), and **importing the PLY sequence into Blender 5.0 (headless) and checking the per-frame
+instance positions**, and executing the whole notebook end-to-end in CI mode (`GS4D_NOTEBOOK_TEST=1`). The pycolmap
+stage was run on 36 synthetic views (36/36 registered). The real oak scan's 96-frame, 500k-splat PLY sequence was
+imported into Blender 5.0 headless: 500,166 instances per frame, animated.
 
 Not verified here (no GPU in the build environment): gsplat CUDA rendering and real gsplat training. That code
 follows gsplat 1.5's API and its densification strategy was exercised on CPU.
