@@ -202,11 +202,18 @@ class TrainConfig:
     init_opacity: float = 0.1
     init_scale: float = 1.0
     object_init: bool = True         # keep only SfM points that project inside the masks
+    refine_start: int = 500
+    refine_every: int = 100
     refine_stop_frac: float = 0.7
     reset_every: int = 3000
     log_every: int = 500
     seed: int = 0
-    device: str = "cuda"
+    device: str = "cuda"             # "cpu" works with rasterize_fn=gs4d.torch_raster.rasterize_cpu
+    max_gaussians: int = 0           # densification budget (0 = unlimited): keeps CPU training tractable
+    grow_grad2d: float = 0.0002      # densification threshold on the mean 2D positional gradient
+    init_points: int = 40_000        # visual-hull samples when the masks, not SfM, define the object
+    eval_every: int = 0              # call ``callback(step, model)`` every N steps (and at the end)
+    res_schedule: tuple = ((0, 1),)  # (start_step, downsample factor): coarse-to-fine, e.g. ((0, 4), (1500, 2), (3500, 1))
 
 
 def _ssim(img1, img2, window: int = 11, sigma: float = 1.5):
@@ -278,7 +285,7 @@ def _init_points(data: TrainData, cfg: TrainConfig):
         print(f"object init: {keep.sum()}/{len(pts)} SfM points lie inside the masks")
         pts, cols = pts[keep], cols[keep]
         if len(pts) < 5000:
-            hp, hc = visual_hull_points(data, seed=cfg.seed)
+            hp, hc = visual_hull_points(data, max_points=cfg.init_points, seed=cfg.seed)
             print(f"object init: + {len(hp)} visual-hull samples")
             pts = np.concatenate([pts, hp])
             cols = np.concatenate([cols, hc])
@@ -290,8 +297,58 @@ def _init_points(data: TrainData, cfg: TrainConfig):
     return pts, cols, dist
 
 
-def train_object_splat(data: TrainData, cfg: TrainConfig | None = None, rasterize_fn=None) -> GaussianModel:
-    """Masked 3DGS training with gsplat's DefaultStrategy densification."""
+def _budget_strategy(base):
+    """``DefaultStrategy`` whose densification never exceeds ``strategy.cap`` Gaussians.
+
+    When more splats qualify than the budget allows, only those with the
+    largest view-space gradients grow (each grown splat adds exactly one).
+    """
+    import torch
+
+    class BudgetStrategy(base):
+        cap = 0
+
+        def _grow_gs(self, params, optimizers, state, step):
+            room = self.cap - len(params["means"]) if self.cap else None
+            if room is None:
+                return super()._grow_gs(params, optimizers, state, step)
+            if room <= 0:
+                return 0, 0
+            grads = state["grad2d"] / state["count"].clamp_min(1)
+            old = self.grow_grad2d
+            if int((grads > old).sum()) > room:
+                self.grow_grad2d = float(torch.topk(grads, room).values[-1]) * (1 - 1e-6)
+            try:
+                return super()._grow_gs(params, optimizers, state, step)
+            finally:
+                self.grow_grad2d = old
+
+    return BudgetStrategy
+
+
+def _to_model(splats) -> GaussianModel:
+    import torch
+
+    with torch.no_grad():
+        return GaussianModel(
+            splats["means"].cpu().numpy(),
+            splats["quats"].cpu().numpy(),
+            splats["scales"].cpu().numpy(),
+            splats["opacities"].cpu().numpy(),
+            splats["sh0"][:, 0].cpu().numpy(),
+            splats["shN"].cpu().numpy(),
+        )
+
+
+def train_object_splat(data: TrainData, cfg: TrainConfig | None = None, rasterize_fn=None,
+                       callback=None) -> GaussianModel:
+    """Masked 3DGS training with gsplat's DefaultStrategy densification.
+
+    ``rasterize_fn`` defaults to ``gsplat.rasterization`` (CUDA); pass
+    :func:`gs4d.torch_raster.rasterize_cpu` with ``cfg.device="cpu"`` to train
+    without a GPU.  ``callback(step, model)`` is called every ``cfg.eval_every``
+    steps and after the last one.
+    """
     import torch
     from gsplat.strategy import DefaultStrategy
 
@@ -321,24 +378,47 @@ def train_object_splat(data: TrainData, cfg: TrainConfig | None = None, rasteriz
         k: torch.optim.Adam([{"params": splats[k], "lr": lr, "name": k}], eps=1e-15) for k, lr in lrs.items()
     }
     sched = torch.optim.lr_scheduler.ExponentialLR(optimizers["means"], gamma=0.01 ** (1.0 / cfg.iters))
-    strategy = DefaultStrategy(
-        refine_stop_iter=int(cfg.iters * cfg.refine_stop_frac), reset_every=cfg.reset_every, verbose=False
+    strategy = _budget_strategy(DefaultStrategy)(
+        refine_start_iter=cfg.refine_start, refine_every=cfg.refine_every,
+        refine_stop_iter=int(cfg.iters * cfg.refine_stop_frac), reset_every=cfg.reset_every, verbose=False,
+        grow_grad2d=cfg.grow_grad2d,
     )
+    strategy.cap = cfg.max_gaussians
     strategy.check_sanity(splats, optimizers)
     state = strategy.initialize_state(scene_scale=scene_scale)
 
-    imgs = [torch.from_numpy(im).to(dev) for im in data.images]  # uint8 on device
-    masks = [torch.from_numpy(m).to(dev)[..., None] for m in data.masks]
     views = [torch.from_numpy(c.viewmat.astype(np.float32)).to(dev) for c in data.cameras]
-    Ks = [torch.from_numpy(c.K.astype(np.float32)).to(dev) for c in data.cameras]
-    order = rng.permutation(len(imgs))
+    pyramid = {}
+
+    def level(f: int):
+        """Images, masks, intrinsics and sizes downsampled by ``f`` (area average), built on first use."""
+        if f not in pyramid:
+            ims, ms, ks, sizes = [], [], [], []
+            for im, mk, c in zip(data.images, data.masks, data.cameras):
+                h, w = (im.shape[0] // f) * f, (im.shape[1] // f) * f
+                a = mk[:h, :w].reshape(h // f, f, w // f, f).mean((1, 3))
+                rgb = (im[:h, :w].astype(np.float32) / 255.0 * mk[:h, :w, None]).reshape(h // f, f, w // f, f, 3)
+                rgb = rgb.mean((1, 3)) / np.maximum(a, 1e-6)[..., None]   # un-premultiplied again
+                ims.append(torch.from_numpy(np.ascontiguousarray(rgb, np.float32)).to(dev))
+                ms.append(torch.from_numpy(np.ascontiguousarray(a, np.float32)).to(dev)[..., None])
+                K = c.K.astype(np.float32).copy()
+                K[:2] /= f
+                ks.append(torch.from_numpy(K).to(dev))
+                sizes.append((w // f, h // f))
+            pyramid[f] = (ims, ms, ks, sizes)
+        return pyramid[f]
+
+    schedule = sorted(cfg.res_schedule)
+    order = rng.permutation(len(data.images))
     t0 = time.time()
     for step in range(cfg.iters):
         i = int(order[step % len(order)])
         if step % len(order) == len(order) - 1:
-            order = rng.permutation(len(imgs))
-        cam = data.cameras[i]
-        gt = imgs[i].float() / 255.0
+            order = rng.permutation(len(data.images))
+        factor = [f for start, f in schedule if step >= start][-1]
+        imgs, masks, Ks, sizes = level(int(factor))
+        width, height = sizes[i]
+        gt = imgs[i]
         m = masks[i]
         bg = torch.rand(3, device=dev) if cfg.random_background else torch.zeros(3, device=dev)
         gt_c = gt * m + bg * (1.0 - m)
@@ -347,7 +427,7 @@ def train_object_splat(data: TrainData, cfg: TrainConfig | None = None, rasteriz
         renders, alphas, info = rasterize_fn(
             means=splats["means"], quats=splats["quats"], scales=torch.exp(splats["scales"]),
             opacities=torch.sigmoid(splats["opacities"]), colors=colors,
-            viewmats=views[i][None], Ks=Ks[i][None], width=cam.width, height=cam.height,
+            viewmats=views[i][None], Ks=Ks[i][None], width=width, height=height,
             sh_degree=sh_deg, packed=False, backgrounds=bg[None],
         )
         strategy.step_pre_backward(splats, optimizers, state, step, info)
@@ -365,14 +445,8 @@ def train_object_splat(data: TrainData, cfg: TrainConfig | None = None, rasteriz
         strategy.step_post_backward(splats, optimizers, state, step, info, packed=False)
         if cfg.log_every and (step % cfg.log_every == 0 or step == cfg.iters - 1):
             print(f"  step {step:5d}/{cfg.iters}  loss {loss.item():.4f}  gaussians {len(splats['means']):,}  "
-                  f"{time.time() - t0:.0f}s")
+                  f"{time.time() - t0:.0f}s", flush=True)
+        if callback is not None and ((cfg.eval_every and step % cfg.eval_every == 0) or step == cfg.iters - 1):
+            callback(step + 1, _to_model(splats))
 
-    with torch.no_grad():
-        return GaussianModel(
-            splats["means"].cpu().numpy(),
-            splats["quats"].cpu().numpy(),
-            splats["scales"].cpu().numpy(),
-            splats["opacities"].cpu().numpy(),
-            splats["sh0"][:, 0].cpu().numpy(),
-            splats["shN"].cpu().numpy(),
-        )
+    return _to_model(splats)

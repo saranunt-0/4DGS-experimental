@@ -14,6 +14,11 @@ as that scan.
 | Colour | the scan's baked colour, sky bleed repaired (no view-dependent shine) |
 | Opens in | SuperSplat, Postshot, KIRI 3DGS Render (Blender), Houdini 22, gsplat/INRIA viewers, `gs4d.load_gaussians` |
 
+**`oak_3dgs_render_to_splat_155k.ply`** is the same oak made the other way: 125 renders of the point cloud, then a 3DGS
+trained on those images (155,537 splats, 10.6 MB, same frame). It looks sharper than the 500k direct fit from a
+distance, but shows some needle-shaped splats up close. See
+[`docs/render_to_splat_vs_direct.md`](../../docs/render_to_splat_vs_direct.md).
+
 Regenerate the file, or the wind animation (PLY sequence + Blender importer, ~3 GB for 96 frames):
 
 ```bash
